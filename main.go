@@ -60,6 +60,7 @@ func init() {
 	commandRegistry.register("users", handlerUsers)
 	commandRegistry.register("agg", handlerAgg)
 	commandRegistry.register("addfeed", handlerAddfeed)
+	commandRegistry.register("feeds", handlerFeeds)
 }
 
 func main() {
@@ -229,6 +230,26 @@ func handlerAddfeed(s *state, cmd command) error {
 	}
 
 	fmt.Println(madeFeed)
+
+	return nil
+}
+
+func handlerFeeds(s *state, cmd command) error {
+	if 0 != len(cmd.args) {
+		return errors.New("'feeds' takes no arguments")
+	}
+
+	feeds, err := s.db.GetFeeds(context.Background())
+	if err != nil {
+		return fmt.Errorf("Error getting feeds: %w", err)
+	}
+
+	for i, feed := range feeds {
+		fmt.Printf("%d) Feed: %s\n", (i + 1), feed.Name)
+		fmt.Printf(" - URL: %s\n", feed.Url)
+		fmt.Printf(" - User: %s\n", feed.Username)
+		fmt.Println()
+	}
 
 	return nil
 }

@@ -5,7 +5,7 @@ VALUES (
 	$2,
 	$3,
 	$4
-)
+	)
 RETURNING *;
 
 -- name: GetUser :one
@@ -16,3 +16,6 @@ TRUNCATE users CASCADE;
 
 -- name: GetUsers :many
 SELECT name FROM users;
+
+-- name: GetUserByID :one
+SELECT * FROM users WHERE id = $1;
