@@ -59,8 +59,10 @@ func init() {
 	commandRegistry.register("reset", handlerReset)
 	commandRegistry.register("users", handlerUsers)
 	commandRegistry.register("agg", handlerAgg)
-	commandRegistry.register("addfeed", handlerAddfeed)
+	commandRegistry.register("addfeed", middlewareLoggedIn(handlerAddfeed))
 	commandRegistry.register("feeds", handlerFeeds)
+	commandRegistry.register("follow", middlewareLoggedIn(handlerFollow))
+	commandRegistry.register("following", middlewareLoggedIn(handlerFollowing))
 }
 
 func main() {
@@ -200,16 +202,9 @@ func handlerAgg(s *state, cmd command) error {
 	return nil
 }
 
-func handlerAddfeed(s *state, cmd command) error {
+func handlerAddfeed(s *state, cmd command, user database.User) error {
 	if 2 != len(cmd.args) {
 		return errors.New("'addfeed' requires two arguments: addfeed <name> <url>")
-	}
-
-	// Look up current user's ID.
-	userForWhomFeed := s.config.CurrentUserName
-	userInfo, err := s.db.GetUser(context.Background(), userForWhomFeed)
-	if err != nil {
-		return fmt.Errorf("Error adding feed for user %s: %w", userForWhomFeed, err)
 	}
 
 	feedName := cmd.args[0]
@@ -222,14 +217,24 @@ func handlerAddfeed(s *state, cmd command) error {
 			UpdatedAt: timeNow,
 			Name:      feedName,
 			Url:       feedURL,
-			UserID:    userInfo.ID,
+			UserID:    user.ID,
 		})
 
 	if err != nil {
-		return fmt.Errorf("Error adding feed for user %s: %w", userForWhomFeed, err)
+		return fmt.Errorf("Error adding feed for user %s: %w", user.Name, err)
 	}
 
 	fmt.Println(madeFeed)
+
+	// Now, follow the feed
+	err = handlerFollow(s,
+		command{
+			name: "follow",
+			args: []string{feedURL},
+		}, user)
+	if err != nil {
+		return fmt.Errorf("Error autofollowing newly created feed: %w", err)
+	}
 
 	return nil
 }
@@ -249,6 +254,56 @@ func handlerFeeds(s *state, cmd command) error {
 		fmt.Printf(" - URL: %s\n", feed.Url)
 		fmt.Printf(" - User: %s\n", feed.Username)
 		fmt.Println()
+	}
+
+	return nil
+}
+
+func handlerFollow(s *state, cmd command, user database.User) error {
+	if 1 != len(cmd.args) {
+		return errors.New("'follow' requires a feed URL argument")
+	}
+	// First, get the feed by URL.
+	feedURL := cmd.args[0]
+	feed, err := s.db.GetFeedByURL(context.Background(), feedURL)
+	if err != nil {
+		return fmt.Errorf("Error getting feed for URL '%s': %w", feedURL, err)
+	}
+	// Then, create the follow record.
+	timeNow := time.Now()
+	followRec, err := s.db.CreateFeedFollow(context.Background(),
+		database.CreateFeedFollowParams{
+			ID:        uuid.New(),
+			CreatedAt: timeNow,
+			UpdatedAt: timeNow,
+			FeedID:    feed.ID,
+			UserID:    user.ID,
+		})
+	if err != nil {
+		return fmt.Errorf("Error following feed: %w", err)
+	}
+	// Then, print the name of the feed and current user.
+	fmt.Printf("User '%s' is now following feed '%s'\n",
+		followRec.UserName, followRec.FeedName)
+
+	return nil
+}
+
+func handlerFollowing(s *state, cmd command, user database.User) error {
+	if 0 != len(cmd.args) {
+		return errors.New("'following' doesn't take any arguments")
+	}
+
+	feedsFollowing, err := s.db.GetFeedFollowsForUser(context.Background(),
+		user.ID)
+	if err != nil {
+		return fmt.Errorf("Error getting feeds followed by user '%s': %w",
+			user.Name, err)
+	}
+
+	fmt.Println("Feeds followed by " + user.Name + ":")
+	for _, feed := range feedsFollowing {
+		fmt.Println(feed.FeedName)
 	}
 
 	return nil
@@ -309,4 +364,17 @@ type RSSItem struct {
 	Link        string `xml:"link"`
 	Description string `xml:"description"`
 	PubDate     string `xml:"pubDate"`
+}
+
+func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) error) func(*state, command) error {
+	return func(s *state, cmd command) error {
+		loggedInUser := s.config.CurrentUserName
+		userInfo, err := s.db.GetUser(context.Background(), loggedInUser)
+		if err != nil {
+			return fmt.Errorf("Error looking up currently logged in user %s: %w",
+				loggedInUser, err)
+		}
+
+		return handler(s, cmd, userInfo)
+	}
 }
