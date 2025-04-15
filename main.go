@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/aneesh-mulye/gator/internal/config"
@@ -64,6 +65,7 @@ func init() {
 	commandRegistry.register("follow", middlewareLoggedIn(handlerFollow))
 	commandRegistry.register("following", middlewareLoggedIn(handlerFollowing))
 	commandRegistry.register("unfollow", middlewareLoggedIn(handlerUnfollow))
+	commandRegistry.register("browse", middlewareLoggedIn(handlerBrowse))
 }
 
 func main() {
@@ -189,18 +191,22 @@ func handlerUsers(s *state, cmd command) error {
 }
 
 func handlerAgg(s *state, cmd command) error {
-	if 0 != len(cmd.args) {
-		return errors.New("'agg' takes no arguments")
+	if 1 != len(cmd.args) {
+		return errors.New("'agg' requires one argument: time_between_reqs")
 	}
 
-	feed, err := fetchFeed(context.Background(),
-		"https://www.wagslane.dev/index.xml")
+	time_between_reqs, err := time.ParseDuration(cmd.args[0])
 	if err != nil {
-		return err
+		return fmt.Errorf("Invalid duration '%s': %w", cmd.args[0], err)
 	}
 
-	fmt.Println(feed)
-	return nil
+	ticker := time.NewTicker(time_between_reqs)
+	for ; ; <-ticker.C {
+		err = scrapeFeeds(s)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error scraping feed: %s\n", err.Error())
+		}
+	}
 }
 
 func handlerAddfeed(s *state, cmd command, user database.User) error {
@@ -346,6 +352,45 @@ func handlerUnfollow(s *state, cmd command, user database.User) error {
 	return nil
 }
 
+func handlerBrowse(s *state, cmd command, user database.User) error {
+	if 0 != len(cmd.args) && 1 != len(cmd.args) {
+		return fmt.Errorf("'browse' take at most one parameter: <limit>")
+	}
+
+	var postsToFetch int
+	if 0 == len(cmd.args) {
+		postsToFetch = 2
+	} else {
+		var err error
+		postsToFetch, err = strconv.Atoi(cmd.args[0])
+		if err != nil {
+			return fmt.Errorf("Error parsing argument '%s' to number: %w",
+				cmd.args[0], err)
+		}
+		if postsToFetch <= 0 {
+			return fmt.Errorf("cannot fetch a non-positive number of posts")
+		}
+	}
+	posts, err := s.db.GetPostsForUser(context.Background(),
+		database.GetPostsForUserParams{
+			ID:    user.ID,
+			Limit: int32(postsToFetch),
+		})
+	if err != nil {
+		return fmt.Errorf("Error getting user posts from database: %w", err)
+	}
+
+	for i, post := range posts {
+		fmt.Println("Post " + strconv.Itoa(i+1))
+		fmt.Println(post.Title)
+		fmt.Println(post.Description)
+		fmt.Println(post.Url)
+		fmt.Println()
+	}
+
+	return nil
+}
+
 func fetchFeed(ctx context.Context, feedURL string) (*RSSFeed, error) {
 	// First, create and fill in the request.
 	req, err := http.NewRequestWithContext(ctx, "GET", feedURL, nil)
@@ -374,6 +419,49 @@ func fetchFeed(ctx context.Context, feedURL string) (*RSSFeed, error) {
 	unescapeFeed(&feed)
 	// Then (*shiver*) return a pointer to it. (!!!???!!!)
 	return &feed, nil
+}
+
+func scrapeFeeds(s *state) error {
+	feedRow, err := s.db.GetNextFeedToFetch(context.Background())
+	if err != nil {
+		return fmt.Errorf("Error getting feed '%s' from DB: %w", feedRow.Name, err)
+	}
+
+	err = s.db.MarkFeedFetched(context.Background(), feedRow.ID)
+	if err != nil {
+		return fmt.Errorf("Error marking feed '%s' fetched: %w", feedRow.Name, err)
+	}
+
+	feed, err := fetchFeed(context.Background(), feedRow.Url)
+	if err != nil {
+		return fmt.Errorf("Error fetching feed '%s': %w", feedRow.Name, err)
+	}
+
+	for _, item := range feed.Channel.Item {
+		// Parse the time
+		pubTime, err := time.Parse(time.RFC1123Z, item.PubDate)
+		if err != nil {
+			return fmt.Errorf("Couldn't parse date '%s' in feed '%s': %w",
+				item.PubDate, feed.Channel.Title, err)
+		}
+		timeNow := time.Now()
+		_, err = s.db.CreatePost(context.Background(),
+			database.CreatePostParams{
+				ID:          uuid.New(),
+				CreatedAt:   timeNow,
+				UpdatedAt:   timeNow,
+				Title:       item.Title,
+				Description: item.Description,
+				PublishedAt: pubTime,
+				FeedID:      feedRow.ID,
+				Url:         item.Link,
+			})
+		if err != nil && err.Error() != "pq: duplicate key value violates unique constraint \"posts_url_key\"" {
+			fmt.Println(err.Error())
+		}
+	}
+
+	return nil
 }
 
 func unescapeFeed(feed *RSSFeed) {
