@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/xml"
+	"errors"
 	"fmt"
+	"html"
+	"io"
+	"net/http"
 	"os"
 	"time"
 
-	"errors"
 	"github.com/aneesh-mulye/gator/internal/config"
 	"github.com/aneesh-mulye/gator/internal/database"
 	"github.com/google/uuid"
@@ -54,6 +58,8 @@ func init() {
 	commandRegistry.register("register", handlerRegister)
 	commandRegistry.register("reset", handlerReset)
 	commandRegistry.register("users", handlerUsers)
+	commandRegistry.register("agg", handlerAgg)
+	commandRegistry.register("addfeed", handlerAddfeed)
 }
 
 func main() {
@@ -176,4 +182,110 @@ func handlerUsers(s *state, cmd command) error {
 	}
 
 	return nil
+}
+
+func handlerAgg(s *state, cmd command) error {
+	if 0 != len(cmd.args) {
+		return errors.New("'agg' takes no arguments")
+	}
+
+	feed, err := fetchFeed(context.Background(),
+		"https://www.wagslane.dev/index.xml")
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(feed)
+	return nil
+}
+
+func handlerAddfeed(s *state, cmd command) error {
+	if 2 != len(cmd.args) {
+		return errors.New("'addfeed' requires two arguments: addfeed <name> <url>")
+	}
+
+	// Look up current user's ID.
+	userForWhomFeed := s.config.CurrentUserName
+	userInfo, err := s.db.GetUser(context.Background(), userForWhomFeed)
+	if err != nil {
+		return fmt.Errorf("Error adding feed for user %s: %w", userForWhomFeed, err)
+	}
+
+	feedName := cmd.args[0]
+	feedURL := cmd.args[1]
+	timeNow := time.Now()
+	madeFeed, err := s.db.CreateFeed(context.Background(),
+		database.CreateFeedParams{
+			ID:        uuid.New(),
+			CreatedAt: timeNow,
+			UpdatedAt: timeNow,
+			Name:      feedName,
+			Url:       feedURL,
+			UserID:    userInfo.ID,
+		})
+
+	if err != nil {
+		return fmt.Errorf("Error adding feed for user %s: %w", userForWhomFeed, err)
+	}
+
+	fmt.Println(madeFeed)
+
+	return nil
+}
+
+func fetchFeed(ctx context.Context, feedURL string) (*RSSFeed, error) {
+	// First, create and fill in the request.
+	req, err := http.NewRequestWithContext(ctx, "GET", feedURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "gator")
+	// Then, perform it.
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	// Then, read into a data buffer.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	// Then, unmarshal from the data buffer into the struct
+	var feed RSSFeed
+	err = xml.Unmarshal(body, &feed)
+	if err != nil {
+		return nil, err
+	}
+	// Then unescapte it.
+	unescapeFeed(&feed)
+	// Then (*shiver*) return a pointer to it. (!!!???!!!)
+	return &feed, nil
+}
+
+func unescapeFeed(feed *RSSFeed) {
+	feed.Channel.Title = html.UnescapeString(feed.Channel.Title)
+	feed.Channel.Description = html.UnescapeString(feed.Channel.Description)
+
+	for i := range len(feed.Channel.Item) {
+		feed.Channel.Item[i].Title = html.UnescapeString(feed.Channel.Item[i].Title)
+		feed.Channel.Item[i].Description =
+			html.UnescapeString(feed.Channel.Item[i].Description)
+	}
+}
+
+type RSSFeed struct {
+	Channel struct {
+		Title       string    `xml:"title"`
+		Link        string    `xml:"link"`
+		Description string    `xml:"description"`
+		Item        []RSSItem `xml:"item"`
+	} `xml:"channel"`
+}
+
+type RSSItem struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	PubDate     string `xml:"pubDate"`
 }
