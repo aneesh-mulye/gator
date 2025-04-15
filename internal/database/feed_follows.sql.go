@@ -72,7 +72,7 @@ func (q *Queries) CreateFeedFollow(ctx context.Context, arg CreateFeedFollowPara
 }
 
 const getFeedFollowsForUser = `-- name: GetFeedFollowsForUser :many
-SELECT feed_follows.id, feed_follows.created_at, feed_follows.updated_at, feed_follows.user_id, feed_follows.feed_id, users.name AS user_name, feeds.name AS feed_name
+SELECT feed_follows.id, feed_follows.created_at, feed_follows.updated_at, feed_follows.user_id, feed_follows.feed_id, users.name AS user_name, feeds.name AS feed_name, feeds.url AS url
 FROM feed_follows
 	INNER JOIN users ON feed_follows.user_id = users.id
 	INNER JOIN feeds ON feed_follows.feed_id = feeds.id
@@ -87,6 +87,7 @@ type GetFeedFollowsForUserRow struct {
 	FeedID    uuid.UUID
 	UserName  string
 	FeedName  string
+	Url       string
 }
 
 func (q *Queries) GetFeedFollowsForUser(ctx context.Context, id uuid.UUID) ([]GetFeedFollowsForUserRow, error) {
@@ -106,6 +107,7 @@ func (q *Queries) GetFeedFollowsForUser(ctx context.Context, id uuid.UUID) ([]Ge
 			&i.FeedID,
 			&i.UserName,
 			&i.FeedName,
+			&i.Url,
 		); err != nil {
 			return nil, err
 		}
@@ -118,4 +120,18 @@ func (q *Queries) GetFeedFollowsForUser(ctx context.Context, id uuid.UUID) ([]Ge
 		return nil, err
 	}
 	return items, nil
+}
+
+const unfollowFeed = `-- name: UnfollowFeed :exec
+DELETE FROM feed_follows WHERE user_id = $1 AND feed_id = $2
+`
+
+type UnfollowFeedParams struct {
+	UserID uuid.UUID
+	FeedID uuid.UUID
+}
+
+func (q *Queries) UnfollowFeed(ctx context.Context, arg UnfollowFeedParams) error {
+	_, err := q.db.ExecContext(ctx, unfollowFeed, arg.UserID, arg.FeedID)
+	return err
 }

@@ -63,6 +63,7 @@ func init() {
 	commandRegistry.register("feeds", handlerFeeds)
 	commandRegistry.register("follow", middlewareLoggedIn(handlerFollow))
 	commandRegistry.register("following", middlewareLoggedIn(handlerFollowing))
+	commandRegistry.register("unfollow", middlewareLoggedIn(handlerUnfollow))
 }
 
 func main() {
@@ -304,6 +305,42 @@ func handlerFollowing(s *state, cmd command, user database.User) error {
 	fmt.Println("Feeds followed by " + user.Name + ":")
 	for _, feed := range feedsFollowing {
 		fmt.Println(feed.FeedName)
+	}
+
+	return nil
+}
+
+func handlerUnfollow(s *state, cmd command, user database.User) error {
+	if 1 != len(cmd.args) {
+		return errors.New("'unfollow' takes only the URL of the feed to unfollow")
+	}
+	// Get all the feeds for this user
+	userFeeds, err := s.db.GetFeedFollowsForUser(context.Background(), user.ID)
+	if err != nil {
+		return fmt.Errorf("Error getting feeds for user '%s': %w", user.Name, err)
+	}
+	// Check if the user is in fact following a feed
+	var userFollowsFeed bool
+	var feedID uuid.UUID
+	feedURL := cmd.args[0]
+	for _, feed := range userFeeds {
+		if feed.Url == feedURL {
+			userFollowsFeed = true
+			feedID = feed.FeedID
+			break
+		}
+	}
+	if !userFollowsFeed {
+		return errors.New("you are not following this feed")
+	}
+	// If so, unfollow it
+	err = s.db.UnfollowFeed(context.Background(),
+		database.UnfollowFeedParams{
+			UserID: user.ID,
+			FeedID: feedID,
+		})
+	if err != nil {
+		return fmt.Errorf("Error unfollowing feed: %w", err)
 	}
 
 	return nil
